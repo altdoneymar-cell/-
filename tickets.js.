@@ -1,0 +1,163 @@
+
+const db = require('./db');
+
+const Tickets = {
+  // Abrir ticket
+  create({ channel_id, user_id, order_id = null }) {
+    if (!channel_id || !user_id) {
+      throw new Error('Canal e usuário são obrigatórios.');
+    }
+
+    const existing = db.prepare(`
+      SELECT * FROM tickets
+      WHERE user_id = ?
+      AND status = 'ABERTO'
+    `).get(String(user_id));
+
+    if (existing) {
+      throw new Error('Este usuário já possui um ticket aberto.');
+    }
+
+    if (order_id !== null) {
+      const order = db.prepare(`
+        SELECT * FROM orders
+        WHERE id = ? AND user_id = ?
+      `).get(order_id, String(user_id));
+
+      if (!order) {
+        throw new Error('Pedido não encontrado para este usuário.');
+      }
+    }
+
+    const result = db.prepare(`
+      INSERT INTO tickets (
+        channel_id,
+        user_id,
+        order_id,
+        status
+      )
+      VALUES (?, ?, ?, 'ABERTO')
+    `).run(
+      String(channel_id),
+      String(user_id),
+      order_id
+    );
+
+    return this.getById(result.lastInsertRowid);
+  },
+
+  // Buscar ticket por ID
+  getById(id) {
+    return db.prepare(`
+      SELECT
+        tickets.*,
+        orders.status AS order_status,
+        orders.total_cents AS order_total_cents
+      FROM tickets
+      LEFT JOIN orders
+        ON orders.id = tickets.order_id
+      WHERE tickets.id = ?
+    `).get(id) || null;
+  },
+
+  // Buscar ticket pelo canal
+  getByChannel(channel_id) {
+    return db.prepare(`
+      SELECT * FROM tickets
+      WHERE channel_id = ?
+    `).get(String(channel_id)) || null;
+  },
+
+  // Buscar tickets de um usuário
+  getByUser(user_id) {
+    return db.prepare(`
+      SELECT * FROM tickets
+      WHERE user_id = ?
+      ORDER BY id DESC
+    `).all(String(user_id));
+  },
+
+  // Listar tickets abertos
+  getOpen() {
+    return db.prepare(`
+      SELECT * FROM tickets
+      WHERE status = 'ABERTO'
+      ORDER BY id DESC
+    `).all();
+  },
+
+  // Listar todos os tickets
+  getAll() {
+    return db.prepare(`
+      SELECT * FROM tickets
+      ORDER BY id DESC
+    `).all();
+  },
+
+  // Fechar ticket pelo ID
+  close(id) {
+    const result = db.prepare(`
+      UPDATE tickets
+      SET status = 'FECHADO'
+      WHERE id = ?
+      AND status = 'ABERTO'
+    `).run(id);
+
+    return result.changes > 0
+      ? this.getById(id)
+      : null;
+  },
+
+  // Fechar ticket pelo canal
+  closeByChannel(channel_id) {
+    const result = db.prepare(`
+      UPDATE tickets
+      SET status = 'FECHADO'
+      WHERE channel_id = ?
+      AND status = 'ABERTO'
+    `).run(String(channel_id));
+
+    return result.changes > 0;
+  },
+
+  // Reabrir ticket
+  reopen(id) {
+    const result = db.prepare(`
+      UPDATE tickets
+      SET status = 'ABERTO'
+      WHERE id = ?
+      AND status = 'FECHADO'
+    `).run(id);
+
+    return result.changes > 0
+      ? this.getById(id)
+      : null;
+  },
+
+  // Excluir ticket
+  delete(id) {
+    return db.prepare(`
+      DELETE FROM tickets
+      WHERE id = ?
+    `).run(id).changes > 0;
+  },
+
+  // Estatísticas
+  getStats() {
+    return db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(
+          CASE WHEN status = 'ABERTO'
+          THEN 1 ELSE 0 END
+        ) AS open,
+        SUM(
+          CASE WHEN status = 'FECHADO'
+          THEN 1 ELSE 0 END
+        ) AS closed
+      FROM tickets
+    `).get();
+  }
+};
+
+module.exports = Tickets;

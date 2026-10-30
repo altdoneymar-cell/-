@@ -1,0 +1,306 @@
+
+const db = require('./db');
+const Products = require('./products');
+
+const Orders = {
+  // Criar pedido
+  create({
+    user_id,
+    product_id,
+    quantity = 1,
+    payment_method
+  }) {
+    if (!user_id || !String(user_id).trim()) {
+      throw new Error('ID do usuário obrigatório.');
+    }
+
+    if (!Number.isInteger(product_id) || product_id < 1) {
+      throw new Error('Produto inválido.');
+    }
+
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      throw new Error('Quantidade inválida.');
+    }
+
+    if (!payment_method || !String(payment_method).trim()) {
+      throw new Error('Método de pagamento obrigatório.');
+    }
+
+    const transaction = db.transaction(() => {
+      const product = Products.getById(product_id);
+
+      if (!product || !product.active) {
+        throw new Error('Produto não encontrado ou indisponível.');
+      }
+
+      if (!Products.hasStock(product_id, quantity)) {
+        throw new Error('Estoque insuficiente.');
+      }
+
+      const total_cents = product.price_cents * quantity;
+
+      if (!Number.isSafeInteger(total_cents)) {
+        throw new Error('Valor total inválido.');
+      }
+
+      const stockRemoved = Products.removeStock(
+        product_id,
+        quantity
+      );
+
+      if (!stockRemoved) {
+        throw new Error('Não foi possível reservar o estoque.');
+      }
+
+      const result = db.prepare(`
+        INSERT INTO orders (
+          user_id,
+          product_id,
+          quantity,
+          total_cents,
+          payment_method,
+          status
+        )
+        VALUES (?, ?, ?, ?, ?, 'AGUARDANDO_PAGAMENTO')
+      `).run(
+        String(user_id),
+        product_id,
+        quantity,
+        total_cents,
+        String(payment_method).trim()
+      );
+
+      return this.getById(result.lastInsertRowid);
+    });
+
+    return transaction();
+  },
+
+  // Buscar pedido por ID
+  getById(id) {
+    return db.prepare(`
+      SELECT
+        orders.*,
+        products.name AS product_name,
+        products.category AS product_category
+      FROM orders
+      LEFT JOIN products
+        ON products.id = orders.product_id
+      WHERE orders.id = ?
+    `).get(id) || null;
+  },
+
+  // Listar todos os pedidos
+  getAll() {
+    return db.prepare(`
+      SELECT
+        orders.*,
+        products.name AS product_name
+      FROM orders
+      LEFT JOIN products
+        ON products.id = orders.product_id
+      ORDER BY orders.id DESC
+    `).all();
+  },
+
+  // Buscar pedidos de um usuário
+  getByUser(user_id) {
+    return db.prepare(`
+      SELECT
+        orders.*,
+        products.name AS product_name
+      FROM orders
+      LEFT JOIN products
+        ON products.id = orders.product_id
+      WHERE orders.user_id = ?
+      ORDER BY orders.id DESC
+    `).all(String(user_id));
+  },
+
+  // Buscar pedidos por status
+  getByStatus(status) {
+    return db.prepare(`
+      SELECT
+        orders.*,
+        products.name AS product_name
+      FROM orders
+      LEFT JOIN products
+        ON products.id = orders.product_id
+      WHERE orders.status = ?
+      ORDER BY orders.id DESC
+    `).all(status);
+  },
+
+  // Atualizar ID do pagamento Mercado Pago
+  setPaymentId(id, payment_id) {
+    if (!payment_id) {
+      throw new Error('ID do pagamento obrigatório.');
+    }
+
+    return db.prepare(`
+      UPDATE orders
+      SET mp_payment_id = ?
+      WHERE id = ?
+    `).run(String(payment_id), id).changes > 0;
+  },
+
+  // Confirmar pagamento
+  markAsPaid(id, payment_id = null) {
+    const transaction = db.transaction(() => {
+      const order = db.prepare(`
+        SELECT * FROM orders WHERE id = ?
+      `).get(id);
+
+      if (!order) {
+        throw new Error('Pedido não encontrado.');
+      }
+
+      if (order.status !== 'AGUARDANDO_PAGAMENTO') {
+        throw new Error('Pedido não está aguardando pagamento.');
+      }
+
+      db.prepare(`
+        UPDATE orders
+        SET status = 'PAGO',
+            mp_payment_id = COALESCE(?, mp_payment_id)
+        WHERE id = ?
+      `).run(payment_id, id);
+
+      return this.getById(id);
+    });
+
+    return transaction();
+  },
+
+  // Marcar pedido como entregue
+  deliver(id) {
+    const result = db.prepare(`
+      UPDATE orders
+      SET status = 'ENTREGUE',
+          delivered_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      AND status = 'PAGO'
+    `).run(id);
+
+    if (!result.changes) {
+      throw new Error(
+        'Pedido inexistente ou ainda não foi pago.'
+      );
+    }
+
+    return this.getById(id);
+  },
+
+  // Cancelar pedido e devolver estoque
+  cancel(id) {
+    const transaction = db.transaction(() => {
+      const order = db.prepare(`
+        SELECT * FROM orders WHERE id = ?
+      `).get(id);
+
+      if (!order) {
+        throw new Error('Pedido não encontrado.');
+      }
+
+      if (
+        order.status === 'CANCELADO' ||
+        order.status === 'ENTREGUE'
+      ) {
+        throw new Error('Este pedido não pode ser cancelado.');
+      }
+
+      const stockRestored = Products.addStock(
+        order.product_id,
+        order.quantity
+      );
+
+      if (!stockRestored) {
+        throw new Error('Não foi possível devolver o estoque.');
+      }
+
+      db.prepare(`
+        UPDATE orders
+        SET status = 'CANCELADO'
+        WHERE id = ?
+      `).run(id);
+
+      return this.getById(id);
+    });
+
+    return transaction();
+  },
+
+  // Atualizar status manualmente
+  updateStatus(id, status) {
+    const allowedStatuses = [
+      'AGUARDANDO_PAGAMENTO',
+      'PAGO',
+      'ENTREGUE',
+      'CANCELADO'
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      throw new Error('Status inválido.');
+    }
+
+    if (status === 'CANCELADO') {
+      return this.cancel(id);
+    }
+
+    if (status === 'ENTREGUE') {
+      return this.deliver(id);
+    }
+
+    if (status === 'PAGO') {
+      return this.markAsPaid(id);
+    }
+
+    const result = db.prepare(`
+      UPDATE orders
+      SET status = ?
+      WHERE id = ?
+      AND status = 'PAGO'
+    `).run(status, id);
+
+    return result.changes > 0 ? this.getById(id) : null;
+  },
+
+  // Estatísticas dos pedidos
+  getStats() {
+    return db.prepare(`
+      SELECT
+        COUNT(*) AS total_orders,
+
+        SUM(
+          CASE WHEN status = 'AGUARDANDO_PAGAMENTO'
+          THEN 1 ELSE 0 END
+        ) AS pending_orders,
+
+        SUM(
+          CASE WHEN status = 'PAGO'
+          THEN 1 ELSE 0 END
+        ) AS paid_orders,
+
+        SUM(
+          CASE WHEN status = 'ENTREGUE'
+          THEN 1 ELSE 0 END
+        ) AS delivered_orders,
+
+        SUM(
+          CASE WHEN status = 'CANCELADO'
+          THEN 1 ELSE 0 END
+        ) AS cancelled_orders,
+
+        COALESCE(
+          SUM(
+            CASE WHEN status IN ('PAGO', 'ENTREGUE')
+            THEN total_cents ELSE 0 END
+          ), 0
+        ) AS total_revenue_cents
+
+      FROM orders
+    `).get();
+  }
+};
+
+module.exports = Orders;

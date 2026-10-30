@@ -58,7 +58,7 @@ async function createOrder(interaction, productId, quantity, method) {
     external_reference:String(orderId)}});
    db.prepare('UPDATE orders SET mp_payment_id=? WHERE id=?').run(String(payment.id),orderId);
    const tx = payment.point_of_interaction?.transaction_data;
-  if (tx?.qr_code) embed.addFields({ name: 'Pix copia e cola', value: String(tx.qr_code) });
+ if (tx?.qr_code) embed.addFields({ name: 'Pix copia e cola', value: String(tx.qr_code) });
    if (tx?.qr_code_base64) embed.addFields({name:'QR Code',value:'Abra o app do Discord para consultar o QR Code no link de pagamento, se disponível.'});
   } catch(e) {
    console.error('Mercado Pago:',e.message);

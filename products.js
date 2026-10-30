@@ -1,5 +1,5 @@
 
-const db = require('./database');
+const db = require('./db');
 
 const Products = {
   // Criar produto
@@ -23,8 +23,13 @@ const Products = {
     }
 
     const result = db.prepare(`
-      INSERT INTO products
-      (category, name, description, price_cents, stock)
+      INSERT INTO products (
+        category,
+        name,
+        description,
+        price_cents,
+        stock
+      )
       VALUES (?, ?, ?, ?, ?)
     `).run(category, name, description, price_cents, stock);
 
@@ -34,11 +39,12 @@ const Products = {
   // Buscar produto por ID
   getById(id) {
     return db.prepare(`
-      SELECT * FROM products WHERE id = ?
+      SELECT * FROM products
+      WHERE id = ?
     `).get(id) || null;
   },
 
-  // Listar todos os produtos ativos
+  // Listar produtos ativos
   getAll() {
     return db.prepare(`
       SELECT * FROM products
@@ -47,11 +53,20 @@ const Products = {
     `).all();
   },
 
-  // Listar produtos por categoria
+  // Listar todos, inclusive inativos
+  getAllAdmin() {
+    return db.prepare(`
+      SELECT * FROM products
+      ORDER BY id DESC
+    `).all();
+  },
+
+  // Buscar por categoria
   getByCategory(category) {
     return db.prepare(`
       SELECT * FROM products
-      WHERE category = ? AND active = 1
+      WHERE category = ?
+      AND active = 1
       ORDER BY id DESC
     `).all(category);
   },
@@ -66,6 +81,10 @@ const Products = {
       'stock'
     ];
 
+    if (!data || typeof data !== 'object') {
+      throw new Error('Dados inválidos.');
+    }
+
     const fields = Object.keys(data).filter(
       key => allowed.includes(key)
     );
@@ -76,14 +95,16 @@ const Products = {
 
     if (
       data.price_cents !== undefined &&
-      (!Number.isInteger(data.price_cents) || data.price_cents < 0)
+      (!Number.isInteger(data.price_cents) ||
+       data.price_cents < 0)
     ) {
       throw new Error('Preço inválido.');
     }
 
     if (
       data.stock !== undefined &&
-      (!Number.isInteger(data.stock) || data.stock < -1)
+      (!Number.isInteger(data.stock) ||
+       data.stock < -1)
     ) {
       throw new Error('Estoque inválido.');
     }
@@ -98,39 +119,52 @@ const Products = {
 
     const result = db.prepare(sql).run(...values, id);
 
-    return result.changes > 0 ? this.getById(id) : null;
+    return result.changes > 0
+      ? this.getById(id)
+      : null;
   },
 
   // Ativar produto
   activate(id) {
     return db.prepare(`
-      UPDATE products SET active = 1 WHERE id = ?
+      UPDATE products
+      SET active = 1
+      WHERE id = ?
     `).run(id).changes > 0;
   },
 
   // Desativar produto
   deactivate(id) {
     return db.prepare(`
-      UPDATE products SET active = 0 WHERE id = ?
+      UPDATE products
+      SET active = 0
+      WHERE id = ?
     `).run(id).changes > 0;
   },
 
-  // Excluir produto permanentemente
+  // Excluir produto
   delete(id) {
     return db.prepare(`
-      DELETE FROM products WHERE id = ?
+      DELETE FROM products
+      WHERE id = ?
     `).run(id).changes > 0;
   },
 
-  // Verificar estoque
+  // Verificar estoque disponível
   hasStock(id, quantity = 1) {
     const product = this.getById(id);
 
-    if (!product || !product.active || quantity < 1) {
+    if (
+      !product ||
+      !product.active ||
+      !Number.isInteger(quantity) ||
+      quantity < 1
+    ) {
       return false;
     }
 
-    return product.stock === -1 || product.stock >= quantity;
+    return product.stock === -1 ||
+      product.stock >= quantity;
   },
 
   // Diminuir estoque
